@@ -1,0 +1,483 @@
+// ============================================================
+// SMC / ICT PRO — Smart Money Concepts Indicator
+// Pine Script v5 | Full SMC + ICT Methodology
+// Features: CHoCH, BOS, Liquidity Sweeps, OB, FVG,
+//           Entry/SL/TP boxes, EMA Trail Exit, MTF Dashboard
+// ============================================================
+//@version=5
+indicator("SMC / ICT Pro [Full Suite]", shorttitle="SMC·ICT Pro", overlay=true, max_boxes_count=200, max_lines_count=500, max_labels_count=300)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  INPUTS
+// ─────────────────────────────────────────────────────────────
+
+// ── Market Structure ─────────────────────────────────────────
+grpMS = "▸ Market Structure"
+i_pivotLeft   = input.int (5,  "Pivot Left Bars",   minval=1, maxval=20, group=grpMS)
+i_pivotRight  = input.int (5,  "Pivot Right Bars",  minval=1, maxval=20, group=grpMS)
+i_showBOS     = input.bool(true,"Show BOS Labels",               group=grpMS)
+i_showCHoCH   = input.bool(true,"Show CHoCH Labels",             group=grpMS)
+i_showSweep   = input.bool(true,"Show Liquidity Sweeps",         group=grpMS)
+i_showOB      = input.bool(true,"Show Order Blocks",             group=grpMS)
+i_showFVG     = input.bool(true,"Show Fair Value Gaps",          group=grpMS)
+
+// ── EMA Ribbon / Trail Exit ───────────────────────────────────
+grpEMA = "▸ EMA Ribbon & Trail Exit"
+i_emaFast     = input.int (21,  "EMA Fast",  minval=2,  group=grpEMA)
+i_emaSlow     = input.int (50,  "EMA Slow",  minval=3,  group=grpEMA)
+i_showEMACloud= input.bool(true,"Show EMA Ribbon Cloud",         group=grpEMA)
+i_showTrail   = input.bool(true,"Show EMA Trail Exit Label",     group=grpEMA)
+
+// ── Trade Execution ───────────────────────────────────────────
+grpTE = "▸ Trade Execution"
+i_slBuffer    = input.float(1.5, "SL Buffer (pips/points)",      minval=0.1, step=0.1, group=grpTE, tooltip="Extra distance below sweep wick for SL")
+i_tp1R        = input.float(1.5, "TP1 R:R Ratio",                minval=0.5, step=0.1, group=grpTE)
+i_showRRBox   = input.bool (true,"Show R:R Box",                 group=grpTE)
+i_maxTrades   = input.int  (3,   "Max Concurrent Setups",        minval=1, maxval=5, group=grpTE)
+
+// ── MTF Dashboard ─────────────────────────────────────────────
+grpDash = "▸ MTF Dashboard"
+i_showDash    = input.bool(true, "Show MTF Dashboard",           group=grpDash)
+i_tf1         = input.timeframe("5",   "TF 1", group=grpDash)
+i_tf2         = input.timeframe("15",  "TF 2", group=grpDash)
+i_tf3         = input.timeframe("60",  "TF 3 (1H)", group=grpDash)
+i_tf4         = input.timeframe("240", "TF 4 (4H)", group=grpDash)
+i_adxLen      = input.int(14, "ADX Length", minval=2, group=grpDash)
+i_adxThresh   = input.float(25.0, "ADX Trend Threshold", minval=5, group=grpDash)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  COLORS
+// ─────────────────────────────────────────────────────────────
+C_BULL       = #26a69a
+C_BEAR       = #ef5350
+C_SWEEP      = #f59b14
+C_NEUTRAL    = #787b86
+C_TP1        = #66bb6a
+C_TP2        = #26c6da
+C_TP3        = #ab47bc
+C_SL         = #ef5350
+C_ENTRY      = #ffffff
+C_EMA_EXIT   = #ff9800
+C_OB_BULL    = color.new(#26a69a, 80)
+C_OB_BEAR    = color.new(#ef5350, 80)
+C_FVG_BULL   = color.new(#26a69a, 88)
+C_FVG_BEAR   = color.new(#ef5350, 88)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  HELPERS
+// ─────────────────────────────────────────────────────────────
+pip = syminfo.mintick  // 1 pip/point unit
+
+// ─────────────────────────────────────────────────────────────
+// ░░  1. SWING HIGHS & LOWS
+// ─────────────────────────────────────────────────────────────
+swingH = ta.pivothigh(high, i_pivotLeft, i_pivotRight)
+swingL = ta.pivotlow (low,  i_pivotLeft, i_pivotRight)
+
+// Store last 4 confirmed swing highs/lows (bar index + price)
+var float[] sh_prices = array.new_float(0)
+var int[]   sh_bars   = array.new_int(0)
+var float[] sl_prices = array.new_float(0)
+var int[]   sl_bars   = array.new_int(0)
+
+MAX_PIVOTS = 6
+
+if not na(swingH)
+    array.push(sh_prices, swingH)
+    array.push(sh_bars,   bar_index - i_pivotRight)
+    if array.size(sh_prices) > MAX_PIVOTS
+        array.shift(sh_prices)
+        array.shift(sh_bars)
+
+if not na(swingL)
+    array.push(sl_prices, swingL)
+    array.push(sl_bars,   bar_index - i_pivotRight)
+    if array.size(sl_prices) > MAX_PIVOTS
+        array.shift(sl_prices)
+        array.shift(sl_bars)
+
+// Convenience: most recent confirmed swing
+lastSH = array.size(sh_prices) > 0 ? array.get(sh_prices, array.size(sh_prices)-1) : na
+lastSL = array.size(sl_prices) > 0 ? array.get(sl_prices, array.size(sl_prices)-1) : na
+lastSHBar = array.size(sh_bars) > 0 ? array.get(sh_bars, array.size(sh_bars)-1) : na
+lastSLBar = array.size(sl_bars) > 0 ? array.get(sl_bars, array.size(sl_bars)-1) : na
+
+// ─────────────────────────────────────────────────────────────
+// ░░  2. MARKET STRUCTURE — BOS & CHoCH
+// ─────────────────────────────────────────────────────────────
+// Track internal bias: +1 bullish, -1 bearish
+var int   msBias     = 0
+var float prevSH     = na
+var float prevSL     = na
+var bool  bos_bull   = false
+var bool  bos_bear   = false
+var bool  choch_bull = false
+var bool  choch_bear = false
+
+bos_bull   := false
+bos_bear   := false
+choch_bull := false
+choch_bear := false
+
+if not na(lastSH) and not na(lastSL)
+    // Bullish BOS: close breaks above recent SH while bias was already bullish
+    if close > lastSH and msBias >= 0 and close[1] <= lastSH
+        bos_bull  := true
+        prevSH    := lastSH
+        msBias    := 1
+    // Bullish CHoCH: close breaks above recent SH while bias was bearish
+    if close > lastSH and msBias < 0 and close[1] <= lastSH
+        choch_bull := true
+        prevSH     := lastSH
+        msBias     := 1
+    // Bearish BOS
+    if close < lastSL and msBias <= 0 and close[1] >= lastSL
+        bos_bear  := true
+        prevSL    := lastSL
+        msBias    := -1
+    // Bearish CHoCH
+    if close < lastSL and msBias > 0 and close[1] >= lastSL
+        choch_bear := true
+        prevSL     := lastSL
+        msBias     := -1
+
+// Draw BOS / CHoCH lines + labels
+if bos_bull and i_showBOS
+    line.new(bar_index-1, prevSH, bar_index, prevSH, color=C_BULL, width=1, style=line.style_dashed)
+    label.new(bar_index, prevSH, "BOS", color=color.new(C_BULL,10), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+if bos_bear and i_showBOS
+    line.new(bar_index-1, prevSL, bar_index, prevSL, color=C_BEAR, width=1, style=line.style_dashed)
+    label.new(bar_index, prevSL, "BOS", color=color.new(C_BEAR,10), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if choch_bull and i_showCHoCH
+    line.new(bar_index-1, prevSH, bar_index, prevSH, color=C_BULL, width=2)
+    label.new(bar_index, prevSH, "CHoCH ▲", color=color.new(C_BULL,0), textcolor=color.white, style=label.style_label_down, size=size.normal)
+
+if choch_bear and i_showCHoCH
+    line.new(bar_index-1, prevSL, bar_index, prevSL, color=C_BEAR, width=2)
+    label.new(bar_index, prevSL, "CHoCH ▼", color=color.new(C_BEAR,0), textcolor=color.white, style=label.style_label_up, size=size.normal)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  3. LIQUIDITY SWEEPS (Stop Hunts)
+// ─────────────────────────────────────────────────────────────
+// Bullish sweep: wick breaks below lastSL but body closes back above it
+sweepBull = not na(lastSL) and low < lastSL and close > lastSL and open > lastSL
+// Bearish sweep: wick breaks above lastSH but body closes back below it
+sweepBear = not na(lastSH) and high > lastSH and close < lastSH and open < lastSH
+
+if sweepBull and i_showSweep
+    label.new(bar_index, low, "SWEEP ⚡", color=color.new(C_SWEEP,10), textcolor=color.black, style=label.style_label_up, size=size.small)
+
+if sweepBear and i_showSweep
+    label.new(bar_index, high, "SWEEP ⚡", color=color.new(C_SWEEP,10), textcolor=color.black, style=label.style_label_down, size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  4. ORDER BLOCKS (OB)
+// ─────────────────────────────────────────────────────────────
+// Bullish OB: last bearish candle before a strong bullish move (BOS bull)
+// Bearish OB: last bullish candle before a strong bearish move (BOS bear)
+var box[] bullOBBoxes = array.new_box(0)
+var box[] bearOBBoxes = array.new_box(0)
+var float[] bullOB_top = array.new_float(0)
+var float[] bullOB_bot = array.new_float(0)
+var float[] bearOB_top = array.new_float(0)
+var float[] bearOB_bot = array.new_float(0)
+
+MAX_OB = 3
+
+// Create OB on CHoCH / BOS confirmation
+if (bos_bull or choch_bull) and i_showOB
+    // The OB is the previous bearish candle
+    ob_top = math.max(open[1], close[1])
+    ob_bot = math.min(open[1], close[1])
+    b = box.new(bar_index-2, ob_top, bar_index + 40, ob_bot, border_color=C_BULL, bgcolor=C_OB_BULL, border_width=1)
+    label.new(bar_index-1, ob_top, "Bull OB", color=color.new(C_BULL,0), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    array.push(bullOBBoxes, b)
+    array.push(bullOB_top, ob_top)
+    array.push(bullOB_bot, ob_bot)
+    if array.size(bullOBBoxes) > MAX_OB
+        box.delete(array.shift(bullOBBoxes))
+        array.shift(bullOB_top)
+        array.shift(bullOB_bot)
+
+if (bos_bear or choch_bear) and i_showOB
+    ob_top = math.max(open[1], close[1])
+    ob_bot = math.min(open[1], close[1])
+    b = box.new(bar_index-2, ob_top, bar_index + 40, ob_bot, border_color=C_BEAR, bgcolor=C_OB_BEAR, border_width=1)
+    label.new(bar_index-1, ob_bot, "Bear OB", color=color.new(C_BEAR,0), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+    array.push(bearOBBoxes, b)
+    array.push(bearOB_top, ob_top)
+    array.push(bearOB_bot, ob_bot)
+    if array.size(bearOBBoxes) > MAX_OB
+        box.delete(array.shift(bearOBBoxes))
+        array.shift(bearOB_top)
+        array.shift(bearOB_bot)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  5. FAIR VALUE GAPS (FVG)
+// ─────────────────────────────────────────────────────────────
+// Bullish FVG: gap between candle[2] high and candle[0] low
+// Bearish FVG: gap between candle[2] low and candle[0] high
+fvg_bull = low > high[2]   // gap up
+fvg_bear = high < low[2]   // gap down
+
+if fvg_bull and i_showFVG
+    box.new(bar_index-2, low, bar_index + 20, high[2], border_color=color.new(C_BULL,60), bgcolor=C_FVG_BULL, border_width=1, border_style=line.style_dotted)
+
+if fvg_bear and i_showFVG
+    box.new(bar_index-2, high, bar_index + 20, low[2], border_color=color.new(C_BEAR,60), bgcolor=C_FVG_BEAR, border_width=1, border_style=line.style_dotted)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  6. EMA RIBBON
+// ─────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, i_emaFast)
+emaSlow = ta.ema(close, i_emaSlow)
+
+emaCloudColor = emaFast > emaSlow ? color.new(C_BULL, 80) : color.new(C_BEAR, 80)
+
+p_emaFast = plot(i_showEMACloud ? emaFast : na, "EMA Fast", color=emaFast > emaSlow ? C_BULL : C_BEAR, linewidth=1)
+p_emaSlow = plot(i_showEMACloud ? emaSlow : na, "EMA Slow", color=emaFast > emaSlow ? C_BULL : C_BEAR, linewidth=1)
+fill(p_emaFast, p_emaSlow, color=emaCloudColor, title="EMA Cloud")
+
+// ─────────────────────────────────────────────────────────────
+// ░░  7. TRADE SETUPS — Entry / SL / TP
+// ─────────────────────────────────────────────────────────────
+// We only fire a setup when BOTH conditions are true:
+//   a) A liquidity sweep occurred on this bar
+//   b) The confirmation candle is an engulfing / strong rejection
+
+// Bullish confirmation: current candle closes bullishly with body > 60% of range
+bodyPct      = math.abs(close - open) / (high - low + pip) 
+bullConfirm  = close > open and bodyPct > 0.5
+bearConfirm  = close < open and bodyPct > 0.5
+
+// Engulfing check
+bullEngulf   = close > open[1] and open < close[1]
+bearEngulf   = close < open[1] and open > close[1]
+
+longSetup    = sweepBull and (bullConfirm or bullEngulf)
+shortSetup   = sweepBear and (bearConfirm or bearEngulf)
+
+// ── TP2 target: nearest OB / FVG in profit direction ─────────
+// For long: nearest bearish OB above entry
+// For short: nearest bullish OB below entry
+f_nearestBearOBAbove(entryPrice) =>
+    result = na(lastSH) ? lastSH : lastSH  // fallback to swing high
+    if array.size(bearOB_bot) > 0
+        for i = array.size(bearOB_bot)-1 to 0
+            lvl = array.get(bearOB_bot, i)
+            if lvl > entryPrice
+                result := lvl
+                break
+    result
+
+f_nearestBullOBBelow(entryPrice) =>
+    result = na(lastSL) ? lastSL : lastSL
+    if array.size(bullOB_top) > 0
+        for i = array.size(bullOB_top)-1 to 0
+            lvl = array.get(bullOB_top, i)
+            if lvl < entryPrice
+                result := lvl
+                break
+    result
+
+// ── Draw setup box (Entry + SL + TP1/2/3) ────────────────────
+if longSetup and i_showRRBox
+    entryP = close
+    slP    = low  - i_slBuffer * pip
+    risk   = entryP - slP
+    tp1P   = entryP + risk * i_tp1R
+    tp2P   = f_nearestBearOBAbove(entryP)
+    tp3P   = not na(lastSH) ? lastSH : entryP + risk * 3.0
+
+    // Make tp2 fallback graceful
+    tp2P  := na(tp2P) or tp2P <= tp1P ? entryP + risk * 2.0 : tp2P
+
+    boxEnd = bar_index + 30
+
+    // Risk zone (Entry → SL) — red
+    box.new(bar_index, entryP, boxEnd, slP, border_color=C_SL, bgcolor=color.new(C_SL, 88), border_width=1)
+    // TP1 zone
+    box.new(bar_index, entryP, boxEnd, tp1P, border_color=C_TP1, bgcolor=color.new(C_TP1, 92), border_width=1)
+    // TP2 zone
+    if tp2P > tp1P
+        box.new(bar_index, tp1P, boxEnd, tp2P, border_color=C_TP2, bgcolor=color.new(C_TP2, 92), border_width=1)
+    // TP3 zone
+    if tp3P > tp2P
+        box.new(bar_index, tp2P, boxEnd, tp3P, border_color=C_TP3, bgcolor=color.new(C_TP3, 92), border_width=1)
+
+    // Lines
+    line.new(bar_index, entryP, boxEnd, entryP, color=C_ENTRY, width=2, style=line.style_solid)
+    line.new(bar_index, slP,    boxEnd, slP,    color=C_SL,    width=1, style=line.style_dashed)
+    line.new(bar_index, tp1P,   boxEnd, tp1P,   color=C_TP1,   width=1, style=line.style_dashed)
+    line.new(bar_index, tp2P,   boxEnd, tp2P,   color=C_TP2,   width=1, style=line.style_dashed)
+    line.new(bar_index, tp3P,   boxEnd, tp3P,   color=C_TP3,   width=1, style=line.style_dashed)
+
+    // Main entry label
+    label.new(bar_index, low - risk*0.3, 
+              "🟢 BUY RE\nEntry: " + str.tostring(entryP, format.mintick) +
+              "\nSL: "    + str.tostring(slP,    format.mintick) +
+              "\nTP1: "   + str.tostring(tp1P,   format.mintick) +
+              "\nTP2: "   + str.tostring(tp2P,   format.mintick) +
+              "\nTP3: "   + str.tostring(tp3P,   format.mintick),
+              color=color.new(C_BULL,5), textcolor=color.white,
+              style=label.style_label_upper_right, size=size.normal)
+
+if shortSetup and i_showRRBox
+    entryP = close
+    slP    = high + i_slBuffer * pip
+    risk   = slP - entryP
+    tp1P   = entryP - risk * i_tp1R
+    tp2P   = f_nearestBullOBBelow(entryP)
+    tp3P   = not na(lastSL) ? lastSL : entryP - risk * 3.0
+
+    tp2P  := na(tp2P) or tp2P >= tp1P ? entryP - risk * 2.0 : tp2P
+
+    boxEnd = bar_index + 30
+
+    box.new(bar_index, slP,    boxEnd, entryP, border_color=C_SL,   bgcolor=color.new(C_SL, 88),   border_width=1)
+    box.new(bar_index, entryP, boxEnd, tp1P,   border_color=C_TP1,  bgcolor=color.new(C_TP1, 92),  border_width=1)
+    if tp2P < tp1P
+        box.new(bar_index, tp1P,   boxEnd, tp2P, border_color=C_TP2, bgcolor=color.new(C_TP2, 92), border_width=1)
+    if tp3P < tp2P
+        box.new(bar_index, tp2P,   boxEnd, tp3P, border_color=C_TP3, bgcolor=color.new(C_TP3, 92), border_width=1)
+
+    line.new(bar_index, entryP, boxEnd, entryP, color=C_ENTRY, width=2, style=line.style_solid)
+    line.new(bar_index, slP,    boxEnd, slP,    color=C_SL,    width=1, style=line.style_dashed)
+    line.new(bar_index, tp1P,   boxEnd, tp1P,   color=C_TP1,   width=1, style=line.style_dashed)
+    line.new(bar_index, tp2P,   boxEnd, tp2P,   color=C_TP2,   width=1, style=line.style_dashed)
+    line.new(bar_index, tp3P,   boxEnd, tp3P,   color=C_TP3,   width=1, style=line.style_dashed)
+
+    label.new(bar_index, high + risk*0.3,
+              "🔴 SELL RE\nEntry: " + str.tostring(entryP, format.mintick) +
+              "\nSL: "    + str.tostring(slP,    format.mintick) +
+              "\nTP1: "   + str.tostring(tp1P,   format.mintick) +
+              "\nTP2: "   + str.tostring(tp2P,   format.mintick) +
+              "\nTP3: "   + str.tostring(tp3P,   format.mintick),
+              color=color.new(C_BEAR,5), textcolor=color.white,
+              style=label.style_label_lower_right, size=size.normal)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  8. EMA TRAILING EXIT
+// ─────────────────────────────────────────────────────────────
+// If price was above EMA ribbon and now crosses below (close < emaSlow) → trail exit for longs
+// If price was below EMA ribbon and now crosses above (close > emaSlow) → trail exit for shorts
+emaExitLong  = close[1] > emaSlow[1] and close < emaSlow and i_showTrail
+emaExitShort = close[1] < emaSlow[1] and close > emaSlow and i_showTrail
+
+if emaExitLong
+    label.new(bar_index, high, "⚠ EMA EXIT", color=color.new(C_EMA_EXIT, 5), textcolor=color.black, style=label.style_label_down, size=size.small)
+
+if emaExitShort
+    label.new(bar_index, low, "⚠ EMA EXIT", color=color.new(C_EMA_EXIT, 5), textcolor=color.black, style=label.style_label_up, size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  9. ADX CALCULATION (current TF)
+// ─────────────────────────────────────────────────────────────
+f_adx(len) =>
+    up      = ta.change(high)
+    down    = -ta.change(low)
+    plusDM  = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    trur    = ta.rma(ta.tr, len)
+    plus    = fixnan(100 * ta.rma(plusDM, len) / trur)
+    minus   = fixnan(100 * ta.rma(minusDM, len) / trur)
+    sum     = plus + minus
+    100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), len)
+
+adxVal = f_adx(i_adxLen)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  10. MTF BIAS FUNCTION
+// ─────────────────────────────────────────────────────────────
+// Returns: 1=Bullish, -1=Bearish, 0=Neutral (uses EMA relationship as proxy)
+f_bias(tf) =>
+    [emaF, emaS, cl] = request.security(syminfo.tickerid, tf, [ta.ema(close, i_emaFast), ta.ema(close, i_emaSlow), close], lookahead=barmerge.lookahead_off)
+    emaF > emaS ? 1 : emaF < emaS ? -1 : 0
+
+f_adxTF(tf) =>
+    request.security(syminfo.tickerid, tf, f_adx(i_adxLen), lookahead=barmerge.lookahead_off)
+
+bias1 = f_bias(i_tf1)
+bias2 = f_bias(i_tf2)
+bias3 = f_bias(i_tf3)
+bias4 = f_bias(i_tf4)
+adx1  = f_adxTF(i_tf1)
+adx2  = f_adxTF(i_tf2)
+adx3  = f_adxTF(i_tf3)
+adx4  = f_adxTF(i_tf4)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  11. MTF DASHBOARD TABLE
+// ─────────────────────────────────────────────────────────────
+f_biasStr(b) =>
+    b == 1 ? "▲ BULL" : b == -1 ? "▼ BEAR" : "◆ NEUT"
+
+f_biasCol(b) =>
+    b == 1 ? C_BULL : b == -1 ? C_BEAR : C_NEUTRAL
+
+f_adxCol(adxV) =>
+    adxV >= i_adxThresh ? color.new(#66bb6a, 20) : color.new(#546e7a, 30)
+
+f_adxStr(adxV) =>
+    str.tostring(math.round(adxV, 1)) + (adxV >= i_adxThresh ? " ✦" : " ·")
+
+if i_showDash and barstate.islast
+    var table dash = table.new(position.top_right, 5, 6,
+         border_color=color.new(color.white, 60), border_width=1,
+         frame_color=color.new(color.white, 50), frame_width=1)
+
+    // ── Header row ─────────────────────────────────────────
+    hBg  = color.new(#1a1d27, 10)
+    hTxt = color.new(color.white, 10)
+
+    table.cell(dash, 0, 0, "  SMC·ICT PRO  ", text_color=hTxt, bgcolor=hBg, text_size=size.small, text_halign=text.align_center)
+    table.merge_cells(dash, 0, 0, 4, 0)
+
+    table.cell(dash, 0, 1, "TF",     text_color=hTxt, bgcolor=hBg, text_size=size.small)
+    table.cell(dash, 1, 1, "Bias",   text_color=hTxt, bgcolor=hBg, text_size=size.small)
+    table.cell(dash, 2, 1, "ADX",    text_color=hTxt, bgcolor=hBg, text_size=size.small)
+    table.cell(dash, 3, 1, "Trend",  text_color=hTxt, bgcolor=hBg, text_size=size.small)
+    table.cell(dash, 4, 1, "Signal", text_color=hTxt, bgcolor=hBg, text_size=size.small)
+
+    // ── Rows ───────────────────────────────────────────────
+    rowData = array.from(i_tf1, i_tf2, i_tf3, i_tf4)
+    biases  = array.from(bias1, bias2, bias3, bias4)
+    adxVals = array.from(adx1,  adx2,  adx3,  adx4)
+    rowBg   = color.new(#0d1117, 20)
+
+    for r = 0 to 3
+        tf_str  = array.get(rowData, r)
+        b       = array.get(biases,  r)
+        adxV    = array.get(adxVals, r)
+        isStrong= adxV >= i_adxThresh
+        sigStr  = b == 1 and isStrong ? "🟢 GO" : b == -1 and isStrong ? "🔴 GO" : "⏸ WAIT"
+        sigBg   = b == 1 and isStrong ? color.new(C_BULL, 60) : b == -1 and isStrong ? color.new(C_BEAR, 60) : color.new(C_NEUTRAL, 70)
+
+        table.cell(dash, 0, r+2, "  " + tf_str + "  ", text_color=color.white, bgcolor=rowBg,          text_size=size.small)
+        table.cell(dash, 1, r+2, f_biasStr(b),          text_color=color.white, bgcolor=f_biasCol(b),   text_size=size.small)
+        table.cell(dash, 2, r+2, f_adxStr(adxV),        text_color=color.white, bgcolor=f_adxCol(adxV), text_size=size.small)
+        table.cell(dash, 3, r+2, isStrong ? "TREND" : "RANGE", text_color=color.white, bgcolor=f_adxCol(adxV), text_size=size.tiny)
+        table.cell(dash, 4, r+2, sigStr,                text_color=color.white, bgcolor=sigBg,          text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// ░░  12. BACKGROUND BIAS TINT
+// ─────────────────────────────────────────────────────────────
+bgcolor(msBias == 1 ? color.new(C_BULL, 97) : msBias == -1 ? color.new(C_BEAR, 97) : na, title="Structure Bias Background")
+
+// ─────────────────────────────────────────────────────────────
+// ░░  13. ALERTS
+// ─────────────────────────────────────────────────────────────
+alertcondition(longSetup,    "SMC Long Setup (BUY RE)",   "SMC·ICT: BUY Reversal Entry triggered!")
+alertcondition(shortSetup,   "SMC Short Setup (SELL RE)", "SMC·ICT: SELL Reversal Entry triggered!")
+alertcondition(sweepBull,    "Bullish Liquidity Sweep",   "SMC·ICT: Bullish Stop Hunt detected!")
+alertcondition(sweepBear,    "Bearish Liquidity Sweep",   "SMC·ICT: Bearish Stop Hunt detected!")
+alertcondition(choch_bull,   "CHoCH — Bullish Shift",     "SMC·ICT: CHoCH Bullish Market Structure Shift!")
+alertcondition(choch_bear,   "CHoCH — Bearish Shift",     "SMC·ICT: CHoCH Bearish Market Structure Shift!")
+alertcondition(emaExitLong,  "EMA Trail Exit — Long",     "SMC·ICT: EMA Exit signal for Long trade!")
+alertcondition(emaExitShort, "EMA Trail Exit — Short",    "SMC·ICT: EMA Exit signal for Short trade!")
+
+// ─────────────────────────────────────────────────────────────
+// ░░  END OF SCRIPT
+// ────────────────────────────────
