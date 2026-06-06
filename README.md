@@ -1,0 +1,1 @@
+# -Smart-Money-Concepts-Pine-Script-v5-Methodology-EMA-Trail-Exit-MTF-Dashboard
